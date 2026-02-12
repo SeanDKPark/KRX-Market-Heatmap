@@ -102,21 +102,14 @@ def render_toggle_group(label, options, key_prefix, default_all=True, columns=2)
 def main():
     # --- Sidebar ---
     with st.sidebar:
-        st.title("📅 Settings")
-
-        # 1. Date Picker (FIXED FOR KST)
-        # Force timezone to Seoul so the server knows it's "Today" in Korea
-        kst = pytz.timezone('Asia/Seoul')
-        today_kst = datetime.now(kst).date()
-
-        # Default to yesterday if it's Monday morning or Sunday
-        # (Simple logic: just default to today, let module_0 handle the rollback)
-        default_date = today_kst
-
-        selected_date = st.date_input(
+        st.sidebar.title("📅 Settings")
+    
+        # STATIC MODE: Disable the date picker
+        st.sidebar.info("🔒 Date fixed in Demo Mode")
+        selected_date = st.sidebar.date_input(
             "Select Date",
-            value=default_date,
-            max_value=today_kst
+            value=datetime(2026, 2, 12), # Set this to your snapshot date
+            disabled=True  # Gray it out
         )
 
         # 2. Load Button
@@ -343,4 +336,5 @@ def display_dashboard(df, view_mode, size_mode_label):
 
 
 if __name__ == "__main__":
+
     main()
