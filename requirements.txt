@@ -1,0 +1,8 @@
+streamlit
+pandas
+plotly
+pykrx
+quantlib
+beautifulsoup4
+requests
+pypdf
