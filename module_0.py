@@ -2,14 +2,16 @@ import pandas as pd
 import QuantLib as ql
 from pykrx import stock
 from datetime import datetime
-
+import pytz
 
 def get_latest_business_day(target_date=None):
     """
     Uses QuantLib to find the valid trading day.
     """
     calendar = ql.SouthKorea()
-    today_ql = ql.Date(datetime.now().day, datetime.now().month, datetime.now().year)
+    kst = pytz.timezone('Asia/Seoul')
+    now_kst = datetime.now(kst)
+    today_ql = ql.Date(now_kst.day, now_kst.month, now_kst.year)
 
     if target_date is None:
         date_ql = today_ql

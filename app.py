@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
+import pytz
 
 # --- Import Custom Modules ---
 import module_0  # Date Validator & KRX Fetcher
@@ -103,12 +104,22 @@ def main():
     with st.sidebar:
         st.title("📅 Settings")
 
-        # 1. Date Picker
-        today = datetime.now().date()
-        default_date = today - timedelta(days=1) if today.weekday() == 6 else today
-        selected_date = st.date_input("Select Date", value=default_date, max_value=today)
+        # 1. Date Picker (FIXED FOR KST)
+        # Force timezone to Seoul so the server knows it's "Today" in Korea
+        kst = pytz.timezone('Asia/Seoul')
+        today_kst = datetime.now(kst).date()
 
-        # 2. Load Button (Tight placement)
+        # Default to yesterday if it's Monday morning or Sunday
+        # (Simple logic: just default to today, let module_0 handle the rollback)
+        default_date = today_kst
+
+        selected_date = st.date_input(
+            "Select Date",
+            value=default_date,
+            max_value=today_kst
+        )
+
+        # 2. Load Button
         if st.button("🚀 Load Market Data", type="primary", use_container_width=True):
             st.session_state['run_analysis'] = True
             st.session_state['target_date'] = selected_date
