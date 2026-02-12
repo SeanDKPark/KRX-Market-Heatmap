@@ -26,13 +26,14 @@ def get_latest_business_day(target_date=None):
     return calendar.adjust(date_ql, ql.Preceding)
 
 
-@st.cache_data(ttl=3600)
+# REMOVE CACHE FOR DEBUGGING
+# @st.cache_data(ttl=3600)
 def fetch_krx_snapshot(target_date):
     current_date_ql = get_latest_business_day(target_date)
     calendar = ql.SouthKorea()
     max_retries = 3
 
-    st.info("🔍 Starting Data Fetch Process...")
+    st.info("🔍 Starting Data Fetch Process (Diagnostic Mode)...")
 
     for attempt in range(max_retries):
         date_str = f"{current_date_ql.year()}{current_date_ql.month():02d}{current_date_ql.dayOfMonth():02d}"
@@ -48,40 +49,34 @@ def fetch_krx_snapshot(target_date):
                 current_date_ql = calendar.adjust(current_date_ql - 1, ql.Preceding)
                 continue
 
-            # --- FIX: Standardize Columns Immediately ---
-            # Map known Korean/English variations to standard English
-            # We check what columns we actually got
-            cols = df_price.columns
-            rename_map = {}
-            if '시가' in cols: rename_map['시가'] = 'Open'
-            if '고가' in cols: rename_map['고가'] = 'High'
-            if '저가' in cols: rename_map['저가'] = 'Low'
-            if '종가' in cols: rename_map['종가'] = 'Close'
-            if '거래량' in cols: rename_map['거래량'] = 'Volume'
-            if '거래대금' in cols: rename_map['거래대금'] = 'Amount'
-            if '등락률' in cols: rename_map['등락률'] = 'ChagesRatio'
-
-            if rename_map:
-                df_price.rename(columns=rename_map, inplace=True)
-            # ---------------------------------------------
-
-            st.success(f"   ✅ Got Price Data! ({len(df_price)} rows)")
+            # --- DIAGNOSTIC PRINT ---
+            st.write(f"   📊 Price Columns Received: `{list(df_price.columns)}`")
+            # ------------------------
 
             # 2. Fetch Cap
             st.caption(f"   ... Requesting Market Cap for {date_str}...")
             df_cap = stock.get_market_cap(date_str, market="ALL")
 
-            # --- FIX: Standardize Cap Columns ---
-            cols_cap = df_cap.columns
-            cap_map = {}
-            if '시가총액' in cols_cap: cap_map['시가총액'] = 'Marcap'
-            if '상장주식수' in cols_cap: cap_map['상장주식수'] = 'Shares'
-            if cap_map:
-                df_cap.rename(columns=cap_map, inplace=True)
-            # ------------------------------------
+            # --- DIAGNOSTIC PRINT ---
+            st.write(f"   📊 Cap Columns Received: `{list(df_cap.columns)}`")
+            # ------------------------
 
-            # 3. Merge
-            # Use English keys if possible, or fallback
+            # 3. Standardize Columns (Adaptive)
+            # We construct a rename map based on what we ACTUALLY have
+            price_map = {
+                '시가': 'Open', '고가': 'High', '저가': 'Low', '종가': 'Close',
+                '거래량': 'Volume', '거래대금': 'Amount', '등락률': 'ChagesRatio'
+            }
+            # Only rename columns that exist
+            actual_rename = {k: v for k, v in price_map.items() if k in df_price.columns}
+            df_price.rename(columns=actual_rename, inplace=True)
+
+            cap_map = {'시가총액': 'Marcap', '상장주식수': 'Shares'}
+            actual_cap_rename = {k: v for k, v in cap_map.items() if k in df_cap.columns}
+            df_cap.rename(columns=actual_cap_rename, inplace=True)
+
+            # 4. Merge
+            # Check for common index or columns
             df_merged = pd.merge(df_price, df_cap, left_index=True, right_index=True, how='inner')
 
             if df_merged.empty:
@@ -90,20 +85,26 @@ def fetch_krx_snapshot(target_date):
                 continue
 
             df_merged = df_merged.reset_index()
-            # Rename 'Ticker' column which might be '티커' or 'Ticker'
-            if '티커' in df_merged.columns:
-                df_merged.rename(columns={'티커': 'Code'}, inplace=True)
-            elif 'Ticker' in df_merged.columns:
-                df_merged.rename(columns={'Ticker': 'Code'}, inplace=True)
 
-            # 4. Names
+            # Rename Ticker column (It might be index name or a column)
+            # If '티커' is in columns, rename it. If it was the index, reset_index made it 'index' or 'Code' or 'Ticker'
+            # Let's check columns after reset
+            cols = df_merged.columns
+            if '티커' in cols:
+                df_merged.rename(columns={'티커': 'Code'}, inplace=True)
+            elif 'Ticker' in cols:
+                df_merged.rename(columns={'Ticker': 'Code'}, inplace=True)
+            elif 'index' in cols:
+                df_merged.rename(columns={'index': 'Code'}, inplace=True)  # Fallback if index had no name
+
+            # 5. Names
             st.caption("   ... Mapping Names...")
             df_merged['Name'] = df_merged['Code'].apply(lambda x: stock.get_market_ticker_name(x))
 
-            # 5. Metadata
+            # 6. Metadata & Market
             df_merged['Snapshot_Date'] = date_str
 
-            # 6. Market Division
+            # Market division logic (try/except block to be safe)
             try:
                 kospi_set = set(stock.get_market_ticker_list(date_str, market="KOSPI"))
                 kosdaq_set = set(stock.get_market_ticker_list(date_str, market="KOSDAQ"))
@@ -122,8 +123,12 @@ def fetch_krx_snapshot(target_date):
 
         except Exception as e:
             st.error(f"❌ CRITICAL ERROR on {date_str}: {e}")
-            # print full stack trace to logs if needed
-            print(e)
+            # Print full dataframe columns to see what went wrong
+            try:
+                if 'df_price' in locals(): st.write(f"Final Price Cols: {df_price.columns}")
+            except:
+                pass
+
             current_date_ql = calendar.adjust(current_date_ql - 1, ql.Preceding)
 
     st.error("❌ All attempts failed.")
