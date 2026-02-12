@@ -1,31 +1,21 @@
 import pandas as pd
 import QuantLib as ql
 from pykrx import stock
-from pykrx.website.krx.market.ticker import Ticker
 from datetime import datetime
 import pytz
 import streamlit as st
 import os
 
-# --- LOGGING ---
+# --- LOGGING SETUP ---
 LOG_FILE = "debug_log.txt"
 
 
 def log_message(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"[{timestamp}] {msg}"
+    print(entry)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {msg}\n")
-
-
-# --- MONKEY PATCHING PYKRX ---
-# We are rewriting the internal valid column mapper to handle English headers
-# This runs immediately when module_0 is imported.
-try:
-    from pykrx.website.comm.util import dataframe_empty_handler
-    # We can't easily patch the deep internals safely without copying 100 lines.
-    # Instead, we will use a 'cleaner' scraper approach.
-except:
-    pass
+        f.write(entry + "\n")
 
 
 def get_latest_business_day(target_date=None):
@@ -58,45 +48,54 @@ def fetch_krx_snapshot(target_date):
     calendar = ql.SouthKorea()
     max_retries = 3
 
+    log_message(f"Starting fetch for target date: {target_date}")
+
     for attempt in range(max_retries):
         date_str = f"{current_date_ql.year()}{current_date_ql.month():02d}{current_date_ql.dayOfMonth():02d}"
         st.write(f"🔄 Attempt {attempt + 1}: Trying date **{date_str}**...")
         log_message(f"Attempt {attempt + 1}: {date_str}")
 
         try:
-            # STRATEGY: Use the rawest possible fetch to avoid PyKRX internal renaming crashes.
-            # get_market_ohlcv_by_ticker IS usually safer than get_market_ohlcv(date)
-            # because it returns a simpler structure.
+            # --- STRATEGY: Price Change Function (SAFER than OHLCV) ---
+            # This function returns: '종가', '대비', '등락률', '시가', '고가', '저가', '거래량', '거래대금'
+            # It usually handles missing data better than get_market_ohlcv
+            log_message("Requesting Price Change Data...")
 
-            # 1. Fetch Price
-            log_message("Fetching OHLCV...")
-            # Note: We use the 'by_ticker' variation which downloads the whole market for one day
-            df_price = stock.get_market_ohlcv(date_str, market="ALL")
+            # Note: We use the same date for start/end to get a snapshot
+            df_price = stock.get_market_price_change_by_ticker(date_str, date_str)
 
-            # --- CRITICAL FIX ---
-            # If pykrx didn't crash but returned English columns, we normalize them here.
-            # If pykrx CRASHED inside the library, we catch it below.
+            if df_price is None or df_price.empty:
+                log_message(f"Price data empty for {date_str}.")
+                st.warning(f"   ⚠️ No data for {date_str}.")
+                current_date_ql = calendar.adjust(current_date_ql - 1, ql.Preceding)
+                continue
 
-            # Normalize Price Columns
-            price_map = {
+            log_message(f"Price Cols Received: {list(df_price.columns)}")
+
+            # --- NORMALIZE COLUMNS ---
+            # Map everything to standard English
+            rename_map = {
                 '시가': 'Open', '고가': 'High', '저가': 'Low', '종가': 'Close',
-                '거래량': 'Volume', '거래대금': 'Amount', '등락률': 'ChagesRatio',
+                '거래량': 'Volume', '거래대금': 'Amount', '등락률': 'ChagesRatio', '대비': 'Change',
                 'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close',
-                'Volume': 'Volume', 'Amount': 'Amount', 'Fluctuation': 'ChagesRatio', 'Change': 'ChagesRatio'
+                'Volume': 'Volume', 'Amount': 'Amount', 'Fluctuation': 'ChagesRatio', 'Change': 'Change'
             }
-            df_price.rename(columns=price_map, inplace=True)
+            actual_rename = {k: v for k, v in rename_map.items() if k in df_price.columns}
+            df_price.rename(columns=actual_rename, inplace=True)
 
-            # 2. Fetch Cap
-            log_message("Fetching Cap...")
+            # --- FETCH CAP ---
+            log_message("Requesting Market Cap...")
             df_cap = stock.get_market_cap(date_str, market="ALL")
 
             cap_map = {
                 '시가총액': 'Marcap', '상장주식수': 'Shares',
                 'Marcap': 'Marcap', 'Shares': 'Shares', 'Market Cap': 'Marcap'
             }
-            df_cap.rename(columns=cap_map, inplace=True)
+            actual_cap = {k: v for k, v in cap_map.items() if k in df_cap.columns}
+            df_cap.rename(columns=actual_cap, inplace=True)
 
-            # 3. Merge
+            # --- MERGE ---
+            # Merge on Index (Code)
             df_merged = pd.merge(df_price, df_cap, left_index=True, right_index=True, how='inner')
 
             if df_merged.empty:
@@ -105,6 +104,8 @@ def fetch_krx_snapshot(target_date):
                 continue
 
             df_merged = df_merged.reset_index()
+
+            # Rename Ticker
             cols = df_merged.columns
             if '티커' in cols:
                 df_merged.rename(columns={'티커': 'Code'}, inplace=True)
@@ -113,12 +114,12 @@ def fetch_krx_snapshot(target_date):
             elif 'index' in cols:
                 df_merged.rename(columns={'index': 'Code'}, inplace=True)
 
-            # 4. Names
+            # --- NAMES ---
             log_message("Mapping Names...")
             df_merged['Name'] = df_merged['Code'].apply(lambda x: stock.get_market_ticker_name(x))
             df_merged['Snapshot_Date'] = date_str
 
-            # 5. Market
+            # --- MARKET ---
             try:
                 kospi_set = set(stock.get_market_ticker_list(date_str, market="KOSPI"))
                 kosdaq_set = set(stock.get_market_ticker_list(date_str, market="KOSDAQ"))
@@ -136,18 +137,13 @@ def fetch_krx_snapshot(target_date):
             return df_merged
 
         except Exception as e:
-            # THIS IS WHERE WE CATCH THE LIBRARY CRASH
             error_msg = str(e)
             log_message(f"CRASH: {error_msg}")
-
-            # If the crash is explicitly about missing columns, it means
-            # PyKRX fetched data successfully but failed to process headers.
-            # We can try to use a raw Naver fetch if this fails, but that's complex.
-            # For now, we fallback to previous day.
+            st.error(f"❌ Error on {date_str}: {error_msg}")
 
             current_date_ql = calendar.adjust(current_date_ql - 1, ql.Preceding)
 
-    st.error("❌ All attempts failed. Check 'View Debug Log' below.")
+    st.error("❌ All attempts failed. Check Log below.")
     with st.expander("View Debug Log"):
         with open(LOG_FILE, "r", encoding="utf-8") as f:
             st.text(f.read())
