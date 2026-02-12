@@ -11,8 +11,6 @@ def get_latest_business_day(target_date=None):
     Uses QuantLib to find the valid trading day.
     """
     calendar = ql.SouthKorea()
-
-    # Force KST Timezone logic
     kst = pytz.timezone('Asia/Seoul')
     now_kst = datetime.now(kst)
     today_ql = ql.Date(now_kst.day, now_kst.month, now_kst.year)
@@ -25,70 +23,71 @@ def get_latest_business_day(target_date=None):
     else:
         date_ql = ql.Date(target_date.day, target_date.month, target_date.year)
 
-    # 1. Prevent Future Dates
     if date_ql > today_ql:
-        print(f"⚠️ Future date detected. Snapping to Today.")
         date_ql = today_ql
 
-    # 2. Adjust for Weekend/Holiday (Initial Check)
     valid_date_ql = calendar.adjust(date_ql, ql.Preceding)
-
     return valid_date_ql
 
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour to speed up for other users
+# REMOVE CACHE TEMPORARILY FOR DEBUGGING
+# @st.cache_data(ttl=3600)
 def fetch_krx_snapshot(target_date):
     """
-    Fetches Price + Market Cap + Names with robust retry logic.
+    Fetches Price + Market Cap + Names with VISUAL DEBUGGING.
     """
-    # 1. Get Initial Target Date
     current_date_ql = get_latest_business_day(target_date)
     calendar = ql.SouthKorea()
+    max_retries = 3
 
-    max_retries = 5
+    st.info("🔍 Starting Data Fetch Process...")  # Visual Trace
 
     for attempt in range(max_retries):
-        # Convert QL Date to String "YYYYMMDD"
         date_str = f"{current_date_ql.year()}{current_date_ql.month():02d}{current_date_ql.dayOfMonth():02d}"
-        print(f"🔄 Attempt {attempt + 1}: Fetching KRX Data for [{date_str}]...")
+        st.write(f"🔄 Attempt {attempt + 1}: Trying date **{date_str}**...")
 
         try:
-            # 2. Fetch Price (OHLCV)
-            # market="ALL" fetches KOSPI + KOSDAQ + KONEX
+            # 1. Fetch Price
+            st.caption(f"   ... Requesting OHLCV for {date_str}...")
             df_price = stock.get_market_ohlcv(date_str, market="ALL")
 
-            # CRITICAL CHECK: Is the dataframe empty?
             if df_price is None or df_price.empty:
-                print(f"   ⚠️ Data empty for {date_str}. Rewinding 1 business day...")
+                st.warning(f"   ⚠️ Result empty for {date_str}. Market likely closed.")
                 current_date_ql = calendar.adjust(current_date_ql - 1, ql.Preceding)
                 continue
 
-            # 3. Fetch Cap (Shares, Marcap)
+            st.success(f"   ✅ Got Price Data! ({len(df_price)} rows)")
+
+            # 2. Fetch Cap
+            st.caption(f"   ... Requesting Market Cap for {date_str}...")
             df_cap = stock.get_market_cap(date_str, market="ALL")
 
-            # 4. Merge
-            # inner join ensures we only keep stocks that have both price and cap data
+            # 3. Merge
             df_merged = pd.merge(df_price, df_cap, left_index=True, right_index=True, how='inner')
 
             if df_merged.empty:
-                print(f"   ⚠️ Merged data empty for {date_str}. Rewinding...")
+                st.error(f"   ⚠️ Merge resulted in empty dataframe!")
                 current_date_ql = calendar.adjust(current_date_ql - 1, ql.Preceding)
                 continue
 
             df_merged = df_merged.reset_index()
             df_merged.rename(columns={'티커': 'Code'}, inplace=True)
 
-            # 5. Add Names
-            # This can be slow, but necessary.
-            # Optimization: Fetch ticker list with names if possible, but pykrx separates them.
-            # We stick to the map for accuracy.
-            print("   🏷️ Mapping Tickers to Names...")
+            # 4. Names
+            st.caption("   ... Mapping Names (This is slow)...")
+            # Optimizing: Get ticker list first to check connectivity
+            try:
+                tickers = stock.get_market_ticker_list(date_str, market="KOSPI")
+                if not tickers:
+                    st.error("   ❌ Ticker list is empty. Connection blocked?")
+            except Exception as e:
+                st.error(f"   ❌ Failed to get ticker list: {e}")
+
             df_merged['Name'] = df_merged['Code'].apply(lambda x: stock.get_market_ticker_name(x))
 
-            # 6. Metadata
+            # 5. Finish
             df_merged['Snapshot_Date'] = date_str
 
-            # 7. Market Division
             kospi_set = set(stock.get_market_ticker_list(date_str, market="KOSPI"))
             kosdaq_set = set(stock.get_market_ticker_list(date_str, market="KOSDAQ"))
 
@@ -99,19 +98,16 @@ def fetch_krx_snapshot(target_date):
 
             df_merged['Market'] = df_merged['Code'].apply(assign_market)
 
-            print(f"✅ Success! Fetched {len(df_merged)} tickers from {date_str}.")
+            st.balloons()  # Visual success
             return df_merged
 
         except Exception as e:
-            print(f"❌ Error on {date_str}: {e}")
-            # If a crash happens (e.g. network error), try previous day
+            st.error(f"❌ CRITICAL ERROR on {date_str}: {e}")
             current_date_ql = calendar.adjust(current_date_ql - 1, ql.Preceding)
 
-    print("❌ Failed to fetch data after multiple attempts.")
-    return pd.DataFrame()  # Return empty if all fails
+    st.error("❌ All attempts failed.")
+    return pd.DataFrame()
 
 
 if __name__ == "__main__":
-    # Test Block
-    df = fetch_krx_snapshot("20260212")
-    print(df.head())
+    pass
